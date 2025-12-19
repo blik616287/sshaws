@@ -1,0 +1,11 @@
+# docker-compose.yml
+#
+# Use for building the image only. Runtime is handled by sshaws wrapper.
+#
+# Build:   docker-compose build
+# Install: ./setup.sh
+#
+services:
+  sshaws:
+    build: .
+    image: sshaws:latest
