@@ -12,14 +12,45 @@ Usage:
 
 import argparse
 import json
-import os
 import re
 import subprocess
 import sys
+from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Tuple
 
 import boto3
 from botocore.exceptions import ClientError, NoCredentialsError, ProfileNotFound
+
+
+@dataclass
+class ForwardingOptions:
+    """Port forwarding options."""
+
+    local: List[str] = field(default_factory=list)
+    remote: List[str] = field(default_factory=list)
+    dynamic: Optional[str] = None
+
+
+@dataclass
+class TerminalOptions:
+    """Terminal and execution options."""
+
+    verbose: int = 0
+    no_tty: bool = False
+    force_tty: bool = False
+    no_command: bool = False
+
+
+@dataclass
+class SSHOptions:
+    """Options for SSH connection."""
+
+    identity_file: Optional[str] = None
+    port: int = 22
+    forwarding: ForwardingOptions = field(default_factory=ForwardingOptions)
+    terminal: TerminalOptions = field(default_factory=TerminalOptions)
+    extra_options: List[str] = field(default_factory=list)
+    remote_command: List[str] = field(default_factory=list)
 
 
 class SSHAWSClient:
@@ -42,60 +73,67 @@ class SSHAWSClient:
             sys.exit(1)
         except NoCredentialsError:
             print("Error: AWS credentials not configured", file=sys.stderr)
-            print("Run 'aws configure' or set AWS_PROFILE environment variable", file=sys.stderr)
+            print("Run 'aws configure' or set AWS_PROFILE environment variable",
+                  file=sys.stderr)
             sys.exit(1)
 
     def list_instances(self, show_all: bool = False) -> List[Dict]:
         """List EC2 instances with SSM availability."""
         try:
-            # Get SSM-enabled instances
             ssm_response = self.ssm.describe_instance_information()
-            ssm_instances = {i['InstanceId']: i for i in ssm_response.get('InstanceInformationList', [])}
+            ssm_instances = {
+                i['InstanceId']: i
+                for i in ssm_response.get('InstanceInformationList', [])
+            }
 
-            # Get EC2 instance details
             ec2_response = self.ec2.describe_instances()
             instances = []
 
             for reservation in ec2_response['Reservations']:
                 for instance in reservation['Instances']:
-                    instance_id = instance['InstanceId']
-                    state = instance['State']['Name']
-
-                    # Skip terminated instances
-                    if state == 'terminated':
-                        continue
-
-                    # Skip non-SSM instances unless show_all
-                    ssm_info = ssm_instances.get(instance_id)
-                    if not ssm_info and not show_all:
-                        continue
-
-                    name = next(
-                        (t['Value'] for t in instance.get('Tags', []) if t['Key'] == 'Name'),
-                        '-'
+                    instance_data = self._process_instance(
+                        instance, ssm_instances, show_all
                     )
-
-                    private_ip = instance.get('PrivateIpAddress', '-')
-                    public_ip = instance.get('PublicIpAddress', '-')
-                    platform = ssm_info.get('PlatformType', '-') if ssm_info else '-'
-                    ssm_status = ssm_info.get('PingStatus', 'Offline') if ssm_info else 'No Agent'
-
-                    instances.append({
-                        'instance_id': instance_id,
-                        'name': name,
-                        'state': state,
-                        'private_ip': private_ip,
-                        'public_ip': public_ip,
-                        'platform': platform,
-                        'ssm_status': ssm_status,
-                        'ssm_available': ssm_info is not None and ssm_info.get('PingStatus') == 'Online'
-                    })
+                    if instance_data:
+                        instances.append(instance_data)
 
             return sorted(instances, key=lambda x: (not x['ssm_available'], x['name']))
 
         except ClientError as e:
             print(f"Error listing instances: {e}", file=sys.stderr)
             return []
+
+    def _process_instance(
+        self, instance: Dict, ssm_instances: Dict, show_all: bool
+    ) -> Optional[Dict]:
+        """Process a single EC2 instance and return its data."""
+        instance_id = instance['InstanceId']
+        state = instance['State']['Name']
+
+        if state == 'terminated':
+            return None
+
+        ssm_info = ssm_instances.get(instance_id)
+        if not ssm_info and not show_all:
+            return None
+
+        name = next(
+            (t['Value'] for t in instance.get('Tags', []) if t['Key'] == 'Name'),
+            '-'
+        )
+
+        is_online = ssm_info is not None and ssm_info.get('PingStatus') == 'Online'
+
+        return {
+            'instance_id': instance_id,
+            'name': name,
+            'state': state,
+            'private_ip': instance.get('PrivateIpAddress', '-'),
+            'public_ip': instance.get('PublicIpAddress', '-'),
+            'platform': ssm_info.get('PlatformType', '-') if ssm_info else '-',
+            'ssm_status': ssm_info.get('PingStatus', 'Offline') if ssm_info else 'No Agent',
+            'ssm_available': is_online
+        }
 
     def get_default_user(self, instance_id: str) -> str:
         """Determine default SSH user based on AMI/platform."""
@@ -108,10 +146,12 @@ class SSHAWSClient:
                 platform = instances[0].get('PlatformName', '').lower()
                 if 'ubuntu' in platform:
                     return 'ubuntu'
-                elif 'debian' in platform:
+                if 'debian' in platform:
                     return 'admin'
-                elif 'centos' in platform or 'rhel' in platform:
-                    return 'centos' if 'centos' in platform else 'ec2-user'
+                if 'centos' in platform:
+                    return 'centos'
+                if 'rhel' in platform:
+                    return 'ec2-user'
         except ClientError:
             pass
         return 'ec2-user'
@@ -133,21 +173,8 @@ class SSHAWSClient:
         except ClientError as e:
             return False, str(e)
 
-    def build_ssh_command(self, instance_id: str, user: str,
-                          identity_file: Optional[str] = None,
-                          port: int = 22,
-                          local_forwards: Optional[List[str]] = None,
-                          remote_forwards: Optional[List[str]] = None,
-                          dynamic_forward: Optional[int] = None,
-                          options: Optional[List[str]] = None,
-                          verbose: int = 0,
-                          no_tty: bool = False,
-                          force_tty: bool = False,
-                          no_command: bool = False,
-                          remote_command: Optional[List[str]] = None) -> List[str]:
-        """Build the SSH command with SSM ProxyCommand."""
-
-        # Build ProxyCommand
+    def _build_proxy_command(self, instance_id: str, port: int) -> str:
+        """Build the SSM proxy command string."""
         proxy_parts = [
             'aws', 'ssm', 'start-session',
             '--target', instance_id,
@@ -160,84 +187,72 @@ class SSHAWSClient:
         if self.region:
             proxy_parts.extend(['--region', self.region])
 
-        proxy_cmd = ' '.join(proxy_parts)
+        return ' '.join(proxy_parts)
 
-        # Build SSH command
+    def _add_ssh_options(self, ssh_cmd: List[str], opts: SSHOptions) -> None:
+        """Add SSH options to the command list."""
+        if opts.identity_file:
+            ssh_cmd.extend(['-i', opts.identity_file])
+
+        if opts.port != 22:
+            ssh_cmd.extend(['-p', str(opts.port)])
+
+        for fwd in opts.forwarding.local:
+            ssh_cmd.extend(['-L', fwd])
+
+        for fwd in opts.forwarding.remote:
+            ssh_cmd.extend(['-R', fwd])
+
+        if opts.forwarding.dynamic:
+            ssh_cmd.extend(['-D', opts.forwarding.dynamic])
+
+        if opts.terminal.verbose > 0:
+            ssh_cmd.append('-' + 'v' * min(opts.terminal.verbose, 3))
+
+        if opts.terminal.no_tty:
+            ssh_cmd.append('-T')
+
+        if opts.terminal.force_tty:
+            ssh_cmd.append('-t')
+
+        if opts.terminal.no_command:
+            ssh_cmd.append('-N')
+
+        for opt in opts.extra_options:
+            ssh_cmd.extend(['-o', opt])
+
+    def build_ssh_command(
+        self, instance_id: str, user: str, opts: SSHOptions
+    ) -> List[str]:
+        """Build the SSH command with SSM ProxyCommand."""
+        proxy_cmd = self._build_proxy_command(instance_id, opts.port)
+
         ssh_cmd = ['ssh']
-
-        # Ignore user's SSH config (avoids permission issues with mounted config)
-        ssh_cmd.extend(['-F', '/dev/null'])
-
-        # Proxy command
         ssh_cmd.extend(['-o', f'ProxyCommand={proxy_cmd}'])
-
-        # Standard options for SSM
         ssh_cmd.extend(['-o', 'StrictHostKeyChecking=accept-new'])
         ssh_cmd.extend(['-o', 'UserKnownHostsFile=/dev/null'])
         ssh_cmd.extend(['-o', 'LogLevel=ERROR'])
 
-        # Identity file
-        if identity_file:
-            ssh_cmd.extend(['-i', identity_file])
+        self._add_ssh_options(ssh_cmd, opts)
 
-        # Port (for SSH itself, though SSM handles this)
-        if port != 22:
-            ssh_cmd.extend(['-p', str(port)])
-
-        # Local port forwards (-L)
-        if local_forwards:
-            for fwd in local_forwards:
-                ssh_cmd.extend(['-L', fwd])
-
-        # Remote port forwards (-R)
-        if remote_forwards:
-            for fwd in remote_forwards:
-                ssh_cmd.extend(['-R', fwd])
-
-        # Dynamic forward / SOCKS proxy (-D)
-        if dynamic_forward:
-            ssh_cmd.extend(['-D', str(dynamic_forward)])
-
-        # Verbose
-        if verbose > 0:
-            ssh_cmd.append('-' + 'v' * min(verbose, 3))
-
-        # TTY options
-        if no_tty:
-            ssh_cmd.append('-T')
-        if force_tty:
-            ssh_cmd.append('-t')
-
-        # No command mode (-N)
-        if no_command:
-            ssh_cmd.append('-N')
-
-        # Additional -o options
-        if options:
-            for opt in options:
-                ssh_cmd.extend(['-o', opt])
-
-        # User@host
         ssh_cmd.append(f'{user}@{instance_id}')
 
-        # Remote command
-        if remote_command:
-            ssh_cmd.extend(remote_command)
+        if opts.remote_command:
+            ssh_cmd.extend(opts.remote_command)
 
         return ssh_cmd
 
-    def connect(self, instance_id: str, user: str, **kwargs) -> int:
+    def connect(self, instance_id: str, user: str, opts: SSHOptions) -> int:
         """Execute SSH connection."""
-        # Check SSM availability first
         available, status = self.check_ssm_available(instance_id)
         if not available:
             print(f"Error: Cannot connect to {instance_id}", file=sys.stderr)
             print(f"Reason: {status}", file=sys.stderr)
             return 1
 
-        ssh_cmd = self.build_ssh_command(instance_id, user, **kwargs)
+        ssh_cmd = self.build_ssh_command(instance_id, user, opts)
 
-        if kwargs.get('verbose', 0) > 0:
+        if opts.terminal.verbose > 0:
             print(f"Executing: {' '.join(ssh_cmd)}", file=sys.stderr)
 
         return subprocess.call(ssh_cmd)
@@ -274,11 +289,20 @@ def format_instance_list(instances: List[Dict], output_format: str = 'table') ->
         lines = []
         for i in instances:
             status = '✓' if i['ssm_available'] else '✗'
-            lines.append(f"{status} {i['instance_id']}\t{i['name']}\t{i['private_ip']}")
+            lines.append(
+                f"{status} {i['instance_id']}\t{i['name']}\t{i['private_ip']}"
+            )
         return '\n'.join(lines)
 
-    # Table format
-    header = f"{'SSM':<4} {'Instance ID':<20} {'Name':<28} {'State':<10} {'Private IP':<15} {'Platform':<10}"
+    return _format_table(instances)
+
+
+def _format_table(instances: List[Dict]) -> str:
+    """Format instances as a table."""
+    header = (
+        f"{'SSM':<4} {'Instance ID':<20} {'Name':<28} "
+        f"{'State':<10} {'Private IP':<15} {'Platform':<10}"
+    )
     separator = '-' * len(header)
     lines = [header, separator]
 
@@ -294,7 +318,11 @@ def format_instance_list(instances: List[Dict], output_format: str = 'table') ->
 
 
 def parse_list_command(args: List[str]) -> Tuple[Optional[str], Optional[str], bool, str]:
-    """Parse list subcommand arguments. Returns (profile, region, show_all, output_format)."""
+    """Parse list subcommand arguments.
+
+    Returns:
+        Tuple of (profile, region, show_all, output_format)
+    """
     profile = None
     region = None
     show_all = False
@@ -330,31 +358,34 @@ def parse_list_command(args: List[str]) -> Tuple[Optional[str], Optional[str], b
     return profile, region, show_all, output_format
 
 
-def main():
-    # Handle 'list' subcommand separately to avoid argparse conflicts
-    # Find 'list' in args (skipping options and their values)
-    is_list_command = False
+def _is_list_command() -> bool:
+    """Check if the current command is a list command."""
     skip_next = False
     for arg in sys.argv[1:]:
         if skip_next:
             skip_next = False
             continue
-        if arg in ('--profile', '-P', '--region', '-i', '-p', '-l', '-L', '-R', '-D', '-o'):
+        if arg in ('--profile', '-P', '--region', '-i', '-p', '-l',
+                   '-L', '-R', '-D', '-o'):
             skip_next = True
             continue
         if arg.startswith('-'):
             continue
-        if arg == 'list':
-            is_list_command = True
-        break
+        return arg == 'list'
+    return False
 
-    if is_list_command:
-        profile, region, show_all, output_format = parse_list_command(sys.argv[1:])
-        client = SSHAWSClient(profile=profile, region=region)
-        instances = client.list_instances(show_all=show_all)
-        print(format_instance_list(instances, output_format))
-        return 0
 
+def _handle_list_command() -> int:
+    """Handle the list subcommand."""
+    profile, region, show_all, output_format = parse_list_command(sys.argv[1:])
+    client = SSHAWSClient(profile=profile, region=region)
+    instances = client.list_instances(show_all=show_all)
+    print(format_instance_list(instances, output_format))
+    return 0
+
+
+def _create_parser() -> argparse.ArgumentParser:
+    """Create the argument parser."""
     parser = argparse.ArgumentParser(
         prog='sshaws',
         description='SSH to AWS EC2 instances via SSM',
@@ -369,16 +400,17 @@ Examples:
   sshaws list                             # List SSM-enabled instances
   sshaws list --all                       # List all instances
   sshaws list -o json                     # JSON output
+
+Prerequisites:
+  - AWS CLI v2
+  - Session Manager Plugin
         """
     )
 
-    # Global options
     parser.add_argument('--profile', '-P', metavar='NAME',
                         help='AWS profile name')
     parser.add_argument('--region', metavar='REGION',
                         help='AWS region')
-
-    # SSH options
     parser.add_argument('destination', nargs='?', metavar='[user@]instance-id',
                         help='Target instance (e.g., i-xxx or ec2-user@i-xxx)')
     parser.add_argument('-i', dest='identity_file', metavar='FILE',
@@ -387,14 +419,14 @@ Examples:
                         help='Port to connect to (default: 22)')
     parser.add_argument('-l', dest='login_name', metavar='USER',
                         help='Login name')
-    parser.add_argument('-L', dest='local_forward', action='append', metavar='[bind:]port:host:hostport',
-                        help='Local port forward')
-    parser.add_argument('-R', dest='remote_forward', action='append', metavar='[bind:]port:host:hostport',
-                        help='Remote port forward')
-    parser.add_argument('-D', dest='dynamic_forward', type=int, metavar='[bind:]port',
+    parser.add_argument('-L', dest='local_forward', action='append',
+                        metavar='FORWARD', help='Local port forward')
+    parser.add_argument('-R', dest='remote_forward', action='append',
+                        metavar='FORWARD', help='Remote port forward')
+    parser.add_argument('-D', dest='dynamic_forward', metavar='PORT',
                         help='Dynamic SOCKS proxy')
     parser.add_argument('-N', dest='no_command', action='store_true',
-                        help='Do not execute remote command (for port forwarding)')
+                        help='Do not execute remote command')
     parser.add_argument('-T', dest='no_tty', action='store_true',
                         help='Disable pseudo-terminal allocation')
     parser.add_argument('-t', dest='force_tty', action='store_true',
@@ -408,49 +440,70 @@ Examples:
     parser.add_argument('remote_command', nargs='*', metavar='command',
                         help='Command to execute on remote host')
 
-    args = parser.parse_args()
+    return parser
 
-    # Handle SSH connection
+
+def _handle_ssh_command(args: argparse.Namespace) -> int:
+    """Handle SSH connection command."""
     if not args.destination:
-        parser.print_help()
         return 1
 
-    # Validate instance ID format
     user, instance_id = parse_destination(args.destination)
 
     if not re.match(r'^i-[a-f0-9]{8,17}$', instance_id):
         print(f"Error: Invalid instance ID format: {instance_id}", file=sys.stderr)
-        print("Instance ID should match pattern: i-xxxxxxxxxxxxxxxxx", file=sys.stderr)
+        print("Instance ID should match pattern: i-xxxxxxxxxxxxxxxxx",
+              file=sys.stderr)
         return 1
 
     client = SSHAWSClient(profile=args.profile, region=args.region)
 
-    # Determine user
     if args.login_name:
         user = args.login_name
     elif not user:
         user = client.get_default_user(instance_id)
 
-    # Direct SSM session
     if args.ssm:
         return client.start_ssm_session(instance_id)
 
-    # SSH connection
-    return client.connect(
-        instance_id=instance_id,
-        user=user,
-        identity_file=args.identity_file,
-        port=args.port,
-        local_forwards=args.local_forward,
-        remote_forwards=args.remote_forward,
-        dynamic_forward=args.dynamic_forward,
-        options=args.options,
+    forwarding = ForwardingOptions(
+        local=args.local_forward or [],
+        remote=args.remote_forward or [],
+        dynamic=args.dynamic_forward
+    )
+
+    terminal = TerminalOptions(
         verbose=args.verbose,
         no_tty=args.no_tty,
         force_tty=args.force_tty,
-        no_command=args.no_command,
-        remote_command=args.remote_command if args.remote_command else None
+        no_command=args.no_command
     )
+
+    opts = SSHOptions(
+        identity_file=args.identity_file,
+        port=args.port,
+        forwarding=forwarding,
+        terminal=terminal,
+        extra_options=args.options or [],
+        remote_command=args.remote_command or []
+    )
+
+    return client.connect(instance_id=instance_id, user=user, opts=opts)
+
+
+def main() -> int:
+    """Main entry point for sshaws CLI."""
+    if _is_list_command():
+        return _handle_list_command()
+
+    parser = _create_parser()
+    args = parser.parse_args()
+
+    if not args.destination:
+        parser.print_help()
+        return 1
+
+    return _handle_ssh_command(args)
 
 
 if __name__ == '__main__':

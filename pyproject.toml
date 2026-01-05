@@ -1,0 +1,41 @@
+[project]
+name = "sshaws"
+version = "0.1.0"
+description = "SSH to private AWS EC2 instances via SSM"
+readme = "README.md"
+requires-python = ">=3.8"
+license = "MIT"
+dependencies = [
+    "boto3",
+]
+
+[project.scripts]
+sshaws = "sshaws.cli:main"
+
+[project.optional-dependencies]
+test = [
+    "pytest>=7.0",
+    "pytest-cov>=4.0",
+    "moto>=5.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--cov=sshaws --cov-report=term-missing --cov-report=html --cov-fail-under=95"
+
+[tool.coverage.run]
+source = ["src/sshaws"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+]

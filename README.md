@@ -4,192 +4,86 @@ SSH to private AWS EC2 instances via SSM. Drop-in replacement for `ssh` when con
 
 ## Features
 
-- **SSH-like CLI** - Familiar interface: `sshaws user@i-xxx`
-- **Multi-session support** - Single container, multiple concurrent SSH sessions
-- **No bastion needed** - Connect through AWS SSM service
-- **No public IP required** - Works with fully private instances  
-- **Port forwarding** - Local (`-L`), remote (`-R`), and SOCKS (`-D`)
-- **Identity files** - Standard `-i` option for SSH keys
-- **Instance listing** - Built-in `list` subcommand
+- **SSH-like CLI** — Familiar interface: `sshaws user@i-xxx`
+- **No bastion needed** — Connect through AWS SSM service
+- **No public IP required** — Works with fully private instances
+- **Port forwarding** — Local (`-L`), remote (`-R`), and SOCKS (`-D`)
+- **Identity files** — Standard `-i` option for SSH keys
+- **Instance listing** — Built-in `list` subcommand with multiple output formats
+- **Auto user detection** — Detects default user based on AMI (ubuntu, ec2-user, etc.)
 
-## Quick Start
+## Prerequisites
 
-### Install
+### Local Machine
 
+| Requirement | Installation |
+|-------------|--------------|
+| Python 3.8+ | Pre-installed on most systems |
+| AWS CLI v2 | [AWS CLI Install Guide](https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html) |
+| Session Manager Plugin | [SSM Plugin Install Guide](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html) |
+| AWS credentials | `aws configure` or environment variables |
+
+**Quick install on macOS:**
 ```bash
-# Extract
-tar -xzf sshaws.tar.gz
-cd sshaws
-
-# Run setup (builds Docker image and installs wrapper)
-./setup.sh
-
-# Or install to ~/.local/bin instead of /usr/local/bin
-./setup.sh --user
+brew install awscli session-manager-plugin
 ```
 
-### Connect
-
+**Quick install on Ubuntu/Debian:**
 ```bash
-# List available instances
-sshaws list
+# AWS CLI
+curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o awscliv2.zip
+unzip awscliv2.zip && sudo ./aws/install
 
-# SSH to instance (container auto-starts)
-sshaws i-0123456789abcdef0
-
-# Open another terminal, start another session (reuses same container)
-sshaws ubuntu@i-0987654321fedcba0
-
-# Check active sessions
-sshaws status
-
-# Stop container when done
-sshaws stop
+# Session Manager Plugin
+curl "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb" -o session-manager-plugin.deb
+sudo dpkg -i session-manager-plugin.deb
 ```
 
-### Update / Reinstall
+### EC2 Instance
 
-The setup script is idempotent - run it again anytime to rebuild:
+1. **SSM Agent running** (pre-installed on Amazon Linux 2/2023, Ubuntu 18.04+)
+2. **IAM Instance Profile** with `AmazonSSMManagedInstanceCore` policy
+3. **Network connectivity to SSM** via NAT Gateway or VPC Endpoints
 
-```bash
-./setup.sh
-```
+## Installation
 
-### Uninstall
-
-```bash
-./setup.sh --uninstall
-```
-
-## Multi-Session Support
-
-The tool uses a persistent Docker container that stays running, allowing multiple SSH sessions from different terminals:
+### From PyPI
 
 ```bash
-# Terminal 1: Start first SSH session
-sshaws ec2-user@i-0123456789abcdef0
-
-# Terminal 2: Start second SSH session (reuses container)
-sshaws ubuntu@i-0987654321fedcba0
-
-# Terminal 3: Port forwarding (reuses container)
-sshaws -L 3306:localhost:3306 -N i-0123456789abcdef0
-
-# Terminal 4: Check status
-sshaws status
-# Output:
-#   Status: Running
-#   Active sessions: 3 active SSH/SSM session(s)
+pip install sshaws
 ```
 
-## Management Commands
+### From Source
 
-| Command | Description |
-|---------|-------------|
-| `sshaws start` | Start the persistent container |
-| `sshaws stop` | Stop the container |
-| `sshaws restart` | Restart the container |
-| `sshaws status` | Show container and session status |
+```bash
+git clone <repository>
+cd sshaws/pip-package
+pip install .
+```
 
-## Setup Script Options
+### Development Install
 
-| Option | Description |
-|--------|-------------|
-| `./setup.sh` | Build image and install to `/usr/local/bin` |
-| `./setup.sh --user` | Install to `~/.local/bin` (no sudo) |
-| `./setup.sh --build-only` | Only build Docker image |
-| `./setup.sh --uninstall` | Remove sshaws completely |
+```bash
+pip install -e ".[test]"
+```
+
+### Debian Package
+
+```bash
+# Build
+make deb
+
+# Install
+sudo dpkg -i sshaws_0.1.0_all.deb
+```
 
 ## Usage
-
-```
-sshaws [OPTIONS] [user@]<instance-id> [COMMAND]
-sshaws list [OPTIONS]
-```
-
-### SSH Options
-
-| Option | Description |
-|--------|-------------|
-| `-i FILE` | Identity file (private key) |
-| `-l USER` | Login user name |
-| `-p PORT` | Port (default: 22) |
-| `-L [bind:]port:host:hostport` | Local port forward |
-| `-R [bind:]port:host:hostport` | Remote port forward |
-| `-D [bind:]port` | Dynamic SOCKS proxy |
-| `-N` | No remote command (for tunnels) |
-| `-T` | Disable TTY |
-| `-t` | Force TTY |
-| `-v` | Verbose (repeat for more) |
-| `-o option` | SSH option |
-| `--ssm` | Direct SSM session (no SSH) |
-| `-P, --profile NAME` | AWS profile |
-| `--region REGION` | AWS region |
-
-### List Options
-
-| Option | Description |
-|--------|-------------|
-| `-a, --all` | Show all instances, not just SSM-enabled |
-| `-o, --output FORMAT` | Output format: table, json, simple |
-
-## Examples
-
-### Basic Connection
-
-```bash
-# Auto-detect user (ec2-user for Amazon Linux)
-sshaws i-0123456789abcdef0
-
-# Specify user
-sshaws ubuntu@i-0123456789abcdef0
-
-# With identity file
-sshaws -i ~/.ssh/prod-key.pem ec2-user@i-0123456789abcdef0
-```
-
-### Port Forwarding
-
-```bash
-# Local forward: access remote MySQL on localhost:3306
-sshaws -L 3306:localhost:3306 -N i-0123456789abcdef0
-
-# Local forward: access remote web on localhost:8080
-sshaws -L 8080:localhost:80 -N i-0123456789abcdef0
-
-# Access RDS through EC2 instance
-sshaws -L 5432:my-rds.xxx.us-east-1.rds.amazonaws.com:5432 -N i-xxx
-
-# SOCKS proxy
-sshaws -D 1080 -N i-0123456789abcdef0
-# Then configure browser to use SOCKS5 proxy localhost:1080
-```
-
-### Remote Commands
-
-```bash
-# Run single command
-sshaws i-0123456789abcdef0 uname -a
-
-# Run command with arguments
-sshaws i-0123456789abcdef0 df -h
-
-# Interactive command
-sshaws -t i-0123456789abcdef0 top
-```
 
 ### List Instances
 
 ```bash
 # List SSM-enabled instances
 sshaws list
-
-# Output:
-# SSM  Instance ID          Name                         State      Private IP      Platform
-# ------------------------------------------------------------------------------------------------
-# ✓    i-0123456789abcdef0  web-server-prod              running    10.0.1.50       Linux
-# ✓    i-0fedcba987654321f  api-server-prod              running    10.0.1.51       Linux
-# ✗    i-0111111111111111a  database-server              running    10.0.2.10       Linux
 
 # List all instances (including non-SSM)
 sshaws list --all
@@ -199,6 +93,48 @@ sshaws list -o json
 
 # Simple output (for scripting)
 sshaws list -o simple
+```
+
+**Example output:**
+```
+SSM  Instance ID          Name                         State      Private IP      Platform
+--------------------------------------------------------------------------------------------
+✓    i-0123456789abcdef0  web-server-prod              running    10.0.1.50       Linux
+✓    i-0fedcba987654321f  api-server-prod              running    10.0.1.51       Linux
+✗    i-0111111111111111a  database-server              running    10.0.2.10       Linux
+```
+
+### SSH Connection
+
+```bash
+# Auto-detect user (ec2-user for Amazon Linux, ubuntu for Ubuntu, etc.)
+sshaws i-0123456789abcdef0
+
+# Specify user
+sshaws ubuntu@i-0123456789abcdef0
+
+# With identity file
+sshaws -i ~/.ssh/prod-key.pem ec2-user@i-0123456789abcdef0
+
+# Run remote command
+sshaws i-0123456789abcdef0 uname -a
+```
+
+### Port Forwarding
+
+```bash
+# Local forward: access remote MySQL on localhost:3306
+sshaws -L 3306:localhost:3306 -N i-0123456789abcdef0
+
+# Access RDS through EC2 instance
+sshaws -L 5432:my-rds.xxx.us-east-1.rds.amazonaws.com:5432 -N i-xxx
+
+# SOCKS proxy
+sshaws -D 1080 -N i-0123456789abcdef0
+# Then configure browser to use SOCKS5 proxy localhost:1080
+
+# Remote forward
+sshaws -R 8080:localhost:80 -N i-0123456789abcdef0
 ```
 
 ### AWS Profile & Region
@@ -218,76 +154,148 @@ AWS_PROFILE=production sshaws list
 ### Direct SSM Session
 
 ```bash
-# SSM session without SSH (uses SSM shell)
+# SSM session without SSH (uses SSM shell, no key needed)
 sshaws --ssm i-0123456789abcdef0
 ```
 
-## Docker Usage (without wrapper)
+## CLI Reference
 
-```bash
-# Start persistent container
-docker run -d --name sshaws \
-  -v ~/.aws:/root/.aws:ro \
-  -v ~/.ssh:/root/.ssh:ro \
-  --network host \
-  --restart unless-stopped \
-  sshaws
-
-# List instances
-docker exec -it sshaws sshaws list
-
-# SSH connection (Terminal 1)
-docker exec -it sshaws sshaws ec2-user@i-0123456789abcdef0
-
-# Another SSH connection (Terminal 2 - same container)
-docker exec -it sshaws sshaws ubuntu@i-0987654321fedcba0
-
-# Port forwarding
-docker exec -it sshaws sshaws -L 3306:localhost:3306 -N i-xxx
-
-# Stop container
-docker stop sshaws && docker rm sshaws
+```
+sshaws [OPTIONS] [user@]<instance-id> [COMMAND]
+sshaws list [OPTIONS]
 ```
 
-## Prerequisites
+### SSH Options
 
-### Local Machine
+| Option | Description |
+|--------|-------------|
+| `-i FILE` | Identity file (private key) |
+| `-l USER` | Login user name |
+| `-p PORT` | Port (default: 22) |
+| `-L [bind:]port:host:hostport` | Local port forward |
+| `-R [bind:]port:host:hostport` | Remote port forward |
+| `-D [bind:]port` | Dynamic SOCKS proxy |
+| `-N` | No remote command (for tunnels) |
+| `-T` | Disable TTY |
+| `-t` | Force TTY |
+| `-v` | Verbose (repeat for more: -vv, -vvv) |
+| `-o option` | SSH option (can be repeated) |
+| `--ssm` | Direct SSM session (no SSH) |
+| `-P, --profile NAME` | AWS profile |
+| `--region REGION` | AWS region |
 
-- Docker
-- AWS credentials (`~/.aws/credentials` or environment variables)
+### List Options
 
-### EC2 Instance
+| Option | Description |
+|--------|-------------|
+| `-a, --all` | Show all instances, not just SSM-enabled |
+| `-o, --output FORMAT` | Output format: `table` (default), `json`, `simple` |
+| `-P, --profile NAME` | AWS profile |
+| `--region REGION` | AWS region |
 
-1. **SSM Agent running** (pre-installed on Amazon Linux 2/2023, Ubuntu 18.04+)
-   ```bash
-   # Check status
-   sudo systemctl status amazon-ssm-agent
-   ```
+## How It Works
 
-2. **IAM Instance Profile** with SSM permissions:
-   ```json
-   {
-     "Version": "2012-10-17",
-     "Statement": [{
-       "Effect": "Allow",
-       "Action": [
-         "ssm:UpdateInstanceInformation",
-         "ssmmessages:CreateControlChannel",
-         "ssmmessages:CreateDataChannel",
-         "ssmmessages:OpenControlChannel",
-         "ssmmessages:OpenDataChannel"
-       ],
-       "Resource": "*"
-     }]
-   }
-   ```
-   Or attach the managed policy: `AmazonSSMManagedInstanceCore`
+```
+┌─────────────────┐         HTTPS (443)         ┌─────────────────┐
+│  Local Machine  │ ──────────────────────────▶ │  AWS SSM Service │
+│                 │                             │                 │
+│  sshaws i-xxx   │                             └────────┬────────┘
+│       │         │                                      │
+│       ▼         │                                      ▼
+│  SSH + SSM      │                             ┌─────────────────┐
+│  ProxyCommand   │                             │   EC2 Instance  │
+└─────────────────┘                             │   (private)     │
+                                                │   SSM Agent     │
+                                                └─────────────────┘
+```
 
-3. **Network connectivity to SSM** (one of):
-   - Internet access via NAT Gateway
-   - VPC Endpoints for SSM (ssm, ssmmessages, ec2messages)
+sshaws builds an SSH command with a ProxyCommand that tunnels through SSM:
 
-### IAM User Permissions
+```bash
+ssh -o ProxyCommand="aws ssm start-session --target i-xxx \
+    --document-name AWS-StartSSHSession \
+    --parameters portNumber=22" user@i-xxx
+```
+
+This allows SSH traffic to flow through HTTPS (port 443) to the SSM service, which forwards it to the SSM agent on the EC2 instance. No inbound security group rules or public IPs required.
+
+## Development
+
+### Setup
+
+```bash
+git clone <repository>
+cd sshaws/pip-package
+make install-dev
+```
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `make help` | Show all available targets |
+| `make lint` | Run pylint (must score 10.0/10) |
+| `make test` | Run tests with coverage (95% minimum) |
+| `make build` | Build wheel and sdist |
+| `make deb` | Build Debian package |
+| `make clean` | Remove build artifacts |
+| `make all` | Run lint, test, and build |
+
+### Version Override
+
+```bash
+# Set custom version
+VERSION=1.2.3 make set-version
+
+# Build with custom version
+VERSION=1.2.3 make set-version build deb
+```
+
+### Project Structure
+
+```
+pip-package/
+├── pyproject.toml          # Package configuration
+├── Makefile                # Build automation
+├── README.md
+├── src/
+│   └── sshaws/
+│       ├── __init__.py     # Version
+│       └── cli.py          # Main CLI module
+└── tests/
+    ├── conftest.py         # Test fixtures
+    └── test_cli.py         # Test suite (73 tests, 98% coverage)
+```
+
+## Troubleshooting
+
+### "Instance not found in SSM"
+
+- Verify SSM agent is running: `systemctl status amazon-ssm-agent`
+- Check instance has IAM role with SSM permissions
+- Ensure network path to SSM endpoints exists (NAT or VPC endpoints)
+
+### "Permission denied (publickey)"
+
+- Verify SSH key matches the one on the instance
+- Check username (ubuntu, ec2-user, centos, admin, etc.)
+- Key file permissions: `chmod 600 ~/.ssh/mykey.pem`
+
+### Connection timeout
+
+- Check Security Groups allow outbound HTTPS (443)
+- Verify VPC endpoints or NAT gateway configuration
+- Try `sshaws --ssm i-xxx` to test SSM connectivity directly
+
+### Debug mode
+
+```bash
+sshaws -vvv i-0123456789abcdef0
+```
+
+## IAM Permissions
+
+### User/Role (caller)
 
 ```json
 {
@@ -305,71 +313,27 @@ docker stop sshaws && docker rm sshaws
 }
 ```
 
-## Troubleshooting
+### EC2 Instance Profile
 
-### "Instance not found in SSM"
+Attach the managed policy: `AmazonSSMManagedInstanceCore`
 
-- Verify SSM agent is running: `systemctl status amazon-ssm-agent`
-- Check instance has IAM role with SSM permissions
-- Ensure network path to SSM endpoints exists
-
-### "Permission denied (publickey)"
-
-- Verify SSH key matches the one on the instance
-- Check username (ubuntu, ec2-user, centos, etc.)
-- Key file permissions: `chmod 600 ~/.ssh/mykey.pem`
-
-### Connection timeout
-
-- Check Security Groups allow outbound HTTPS (443)
-- Verify VPC endpoints or NAT gateway configuration
-- Try `sshaws --ssm i-xxx` to test SSM connectivity directly
-
-### Verbose output
-
-```bash
-sshaws -vvv i-0123456789abcdef0
+Or use this custom policy:
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [{
+    "Effect": "Allow",
+    "Action": [
+      "ssm:UpdateInstanceInformation",
+      "ssmmessages:CreateControlChannel",
+      "ssmmessages:CreateDataChannel",
+      "ssmmessages:OpenControlChannel",
+      "ssmmessages:OpenDataChannel"
+    ],
+    "Resource": "*"
+  }]
+}
 ```
-
-## How It Works
-
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│                         Local Machine                                │
-│  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐                  │
-│  │ Terminal 1  │  │ Terminal 2  │  │ Terminal 3  │                  │
-│  │ sshaws i-A  │  │ sshaws i-B  │  │ sshaws -L.. │                  │
-│  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘                  │
-│         │                │                │                         │
-│         └────────────────┼────────────────┘                         │
-│                          ▼                                          │
-│              ┌───────────────────────┐                              │
-│              │   Docker Container    │                              │
-│              │  (sshaws - persistent)│                              │
-│              │   ┌─────┐ ┌─────┐    │                              │
-│              │   │SSH 1│ │SSH 2│... │                              │
-│              │   └─────┘ └─────┘    │                              │
-│              └───────────┬───────────┘                              │
-└──────────────────────────┼──────────────────────────────────────────┘
-                           │ HTTPS (443)
-                           ▼
-                 ┌─────────────────────┐
-                 │    AWS SSM Service  │
-                 └──────────┬──────────┘
-                            │
-              ┌─────────────┼─────────────┐
-              ▼             ▼             ▼
-        ┌──────────┐  ┌──────────┐  ┌──────────┐
-        │ EC2 i-A  │  │ EC2 i-B  │  │ EC2 i-C  │
-        │ (private)│  │ (private)│  │ (private)│
-        └──────────┘  └──────────┘  └──────────┘
-```
-
-**Multi-session architecture:**
-- Single persistent Docker container runs continuously
-- Each `sshaws` command uses `docker exec` to run in the same container
-- Multiple SSH sessions share container resources efficiently
-- Container auto-starts on first use, stays running for subsequent sessions
 
 ## License
 
