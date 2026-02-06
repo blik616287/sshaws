@@ -518,6 +518,123 @@ class TestSSHAWSClientStartSSMSession:
             assert 'myprofile' in call_args
 
 
+class TestSSHAWSClientRunSSMCommand:
+    """Tests for run_ssm_command method."""
+
+    def test_run_command_success(self, mock_boto3_session, capsys):
+        """Test successful command execution with stdout."""
+        mock_boto3_session['ssm'].send_command.return_value = {
+            'Command': {'CommandId': 'cmd-123'}
+        }
+        mock_boto3_session['ssm'].get_command_invocation.return_value = {
+            'Status': 'Success',
+            'StandardOutputContent': 'Linux\n',
+            'StandardErrorContent': '',
+        }
+
+        client = SSHAWSClient()
+        result = client.run_ssm_command('i-1234567890abcdef0', ['uname'])
+
+        assert result == 0
+        captured = capsys.readouterr()
+        assert captured.out == 'Linux\n'
+
+    def test_run_command_with_stderr(self, mock_boto3_session, capsys):
+        """Test command execution with stderr output."""
+        mock_boto3_session['ssm'].send_command.return_value = {
+            'Command': {'CommandId': 'cmd-123'}
+        }
+        mock_boto3_session['ssm'].get_command_invocation.return_value = {
+            'Status': 'Failed',
+            'StandardOutputContent': '',
+            'StandardErrorContent': 'command not found\n',
+        }
+
+        client = SSHAWSClient()
+        result = client.run_ssm_command('i-1234567890abcdef0', ['badcmd'])
+
+        assert result == 1
+        captured = capsys.readouterr()
+        assert 'command not found' in captured.err
+
+    def test_run_command_send_error(self, mock_boto3_session, capsys):
+        """Test ClientError from send_command."""
+        mock_boto3_session['ssm'].send_command.side_effect = ClientError(
+            {'Error': {'Code': 'AccessDenied', 'Message': 'Denied'}},
+            'SendCommand'
+        )
+
+        client = SSHAWSClient()
+        result = client.run_ssm_command('i-1234567890abcdef0', ['uname'])
+
+        assert result == 1
+        captured = capsys.readouterr()
+        assert 'Error sending command' in captured.err
+
+    def test_run_command_poll_retry(self, mock_boto3_session, capsys):
+        """Test polling retries when invocation not yet available."""
+        mock_boto3_session['ssm'].send_command.return_value = {
+            'Command': {'CommandId': 'cmd-123'}
+        }
+        # First call raises, second call returns result
+        mock_boto3_session['ssm'].get_command_invocation.side_effect = [
+            ClientError(
+                {'Error': {'Code': 'InvocationDoesNotExist', 'Message': ''}},
+                'GetCommandInvocation'
+            ),
+            {
+                'Status': 'Success',
+                'StandardOutputContent': 'done\n',
+                'StandardErrorContent': '',
+            },
+        ]
+
+        with patch('sshaws.cli.time.sleep'):
+            client = SSHAWSClient()
+            result = client.run_ssm_command('i-1234567890abcdef0', ['echo', 'done'])
+
+        assert result == 0
+        captured = capsys.readouterr()
+        assert captured.out == 'done\n'
+
+    def test_run_command_timeout(self, mock_boto3_session, capsys):
+        """Test timeout when polling never returns terminal status."""
+        mock_boto3_session['ssm'].send_command.return_value = {
+            'Command': {'CommandId': 'cmd-123'}
+        }
+        mock_boto3_session['ssm'].get_command_invocation.return_value = {
+            'Status': 'InProgress',
+            'StandardOutputContent': '',
+            'StandardErrorContent': '',
+        }
+
+        with patch('sshaws.cli.time.sleep'):
+            client = SSHAWSClient()
+            result = client.run_ssm_command('i-1234567890abcdef0', ['sleep', '999'])
+
+        assert result == 1
+        captured = capsys.readouterr()
+        assert 'Timed out' in captured.err
+
+    def test_run_command_joins_args(self, mock_boto3_session):
+        """Test that command list is joined with spaces."""
+        mock_boto3_session['ssm'].send_command.return_value = {
+            'Command': {'CommandId': 'cmd-123'}
+        }
+        mock_boto3_session['ssm'].get_command_invocation.return_value = {
+            'Status': 'Success',
+            'StandardOutputContent': '',
+            'StandardErrorContent': '',
+        }
+
+        with patch('sshaws.cli.time.sleep'):
+            client = SSHAWSClient()
+            client.run_ssm_command('i-1234567890abcdef0', ['uname', '-a'])
+
+        call_kwargs = mock_boto3_session['ssm'].send_command.call_args
+        assert call_kwargs[1]['Parameters']['commands'] == ['uname -a']
+
+
 class TestSSHAWSClientResolveInstanceId:
     """Tests for resolve_instance_id method."""
 
@@ -1069,3 +1186,38 @@ class TestMain:
                 assert result == 0
                 call_args = mock_call.call_args[0][0]
                 assert 'ubuntu@i-1234567890abcdef0' in call_args
+
+    def test_main_ssm_mode_with_command(self, mock_boto3_session, capsys):
+        """Test --ssm with a remote command uses send_command."""
+        mock_boto3_session['ssm'].send_command.return_value = {
+            'Command': {'CommandId': 'cmd-123'}
+        }
+        mock_boto3_session['ssm'].get_command_invocation.return_value = {
+            'Status': 'Success',
+            'StandardOutputContent': 'Linux\n',
+            'StandardErrorContent': '',
+        }
+
+        with patch.object(
+            sys, 'argv', ['sshaws', '--ssm', 'i-1234567890abcdef0', 'uname']
+        ):
+            with patch('sshaws.cli.time.sleep'):
+                result = main()
+                assert result == 0
+
+        mock_boto3_session['ssm'].send_command.assert_called_once()
+        captured = capsys.readouterr()
+        assert captured.out == 'Linux\n'
+
+    def test_main_ssm_mode_without_command(self, mock_boto3_session):
+        """Test --ssm without command still uses start-session."""
+        with patch.object(
+            sys, 'argv', ['sshaws', '--ssm', 'i-1234567890abcdef0']
+        ):
+            with patch('sshaws.cli.subprocess.call') as mock_call:
+                mock_call.return_value = 0
+                result = main()
+                assert result == 0
+                call_args = mock_call.call_args[0][0]
+                assert 'start-session' in call_args
+        mock_boto3_session['ssm'].send_command.assert_not_called()

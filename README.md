@@ -180,6 +180,10 @@ sshaws --ssm i-0123456789abcdef0
 
 # Also works with Name tag or private IP
 sshaws --ssm my-web-server
+
+# Run a non-interactive command via SSM (no SSH key needed)
+sshaws --ssm i-0123456789abcdef0 uname -a
+sshaws --ssm my-web-server 'cat /etc/os-release'
 ```
 
 ## CLI Reference
@@ -332,6 +336,8 @@ sshaws -vvv i-0123456789abcdef0
       "ssm:StartSession",
       "ssm:TerminateSession",
       "ssm:DescribeInstanceInformation",
+      "ssm:SendCommand",
+      "ssm:GetCommandInvocation",
       "ec2:DescribeInstances"
     ],
     "Resource": "*"
