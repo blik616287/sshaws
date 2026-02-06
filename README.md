@@ -4,7 +4,8 @@ SSH to private AWS EC2 instances via SSM. Drop-in replacement for `ssh` when con
 
 ## Features
 
-- **SSH-like CLI** — Familiar interface: `sshaws user@i-xxx`
+- **SSH-like CLI** — Familiar interface: `sshaws user@<target>`
+- **Flexible target resolution** — Connect by instance ID, Name tag, or private IP address
 - **No bastion needed** — Connect through AWS SSM service
 - **No public IP required** — Works with fully private instances
 - **Port forwarding** — Local (`-L`), remote (`-R`), and SOCKS (`-D`)
@@ -107,11 +108,19 @@ SSM  Instance ID          Name                         State      Private IP    
 ### SSH Connection
 
 ```bash
-# Auto-detect user (ec2-user for Amazon Linux, ubuntu for Ubuntu, etc.)
+# Connect by instance ID
 sshaws i-0123456789abcdef0
+
+# Connect by Name tag
+sshaws my-web-server
+
+# Connect by private IP address
+sshaws 10.0.1.50
 
 # Specify user
 sshaws ubuntu@i-0123456789abcdef0
+sshaws ubuntu@my-web-server
+sshaws ubuntu@10.0.1.50
 
 # With identity file
 sshaws -i ~/.ssh/prod-key.pem ec2-user@i-0123456789abcdef0
@@ -119,6 +128,18 @@ sshaws -i ~/.ssh/prod-key.pem ec2-user@i-0123456789abcdef0
 # Run remote command
 sshaws i-0123456789abcdef0 uname -a
 ```
+
+#### Target Resolution
+
+The `<target>` can be any of the following:
+
+| Format | Example | Description |
+|--------|---------|-------------|
+| Instance ID | `i-0123456789abcdef0` | Direct instance ID (used as-is) |
+| Name tag | `my-web-server` | Resolved via the EC2 `Name` tag |
+| Private IP | `10.0.1.50` | Resolved via the instance's private IP address |
+
+If a Name tag or private IP matches multiple running instances, sshaws exits with an error listing the matches so you can specify the instance ID directly.
 
 ### Port Forwarding
 
@@ -156,14 +177,19 @@ AWS_PROFILE=production sshaws list
 ```bash
 # SSM session without SSH (uses SSM shell, no key needed)
 sshaws --ssm i-0123456789abcdef0
+
+# Also works with Name tag or private IP
+sshaws --ssm my-web-server
 ```
 
 ## CLI Reference
 
 ```
-sshaws [OPTIONS] [user@]<instance-id> [COMMAND]
+sshaws [OPTIONS] [user@]<target> [COMMAND]
 sshaws list [OPTIONS]
 ```
+
+`<target>` can be an instance ID (`i-xxx`), a Name tag, or a private IP address.
 
 ### SSH Options
 
