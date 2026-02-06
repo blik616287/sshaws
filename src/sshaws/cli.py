@@ -11,10 +11,14 @@ Usage:
 """
 
 import argparse
+import base64
+import gzip
 import json
+import os
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Tuple
 
@@ -372,7 +376,11 @@ class SSHAWSClient:
         self, instance_id: str, command: List[str],
         stdin_data: Optional[str] = None
     ) -> int:
-        """Run a non-interactive command via SSM start-session."""
+        """Run a command via SSM. Uses chunked send_command for stdin data."""
+        if stdin_data:
+            return self._run_with_stdin(instance_id, command, stdin_data)
+
+        # No stdin: use start-session for simple commands
         cmd = [
             'aws', 'ssm', 'start-session',
             '--target', instance_id,
@@ -385,13 +393,10 @@ class SSHAWSClient:
         if self.region:
             cmd.extend(['--region', self.region])
 
-        popen_kwargs = {'stdout': subprocess.PIPE, 'stderr': subprocess.PIPE}
-        if stdin_data:
-            popen_kwargs['stdin'] = subprocess.PIPE
-
-        with subprocess.Popen(cmd, **popen_kwargs) as process:
-            stdin_bytes = stdin_data.encode('utf-8') if stdin_data else None
-            stdout_bytes, stderr_bytes = process.communicate(input=stdin_bytes)
+        with subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+        ) as process:
+            stdout_bytes, stderr_bytes = process.communicate()
 
         cleaned_out = self._strip_session_banners(stdout_bytes)
         if cleaned_out:
@@ -404,6 +409,101 @@ class SSHAWSClient:
             sys.stderr.flush()
 
         return process.returncode
+
+    def _run_with_stdin(
+        self, instance_id: str, command: List[str], stdin_data: str
+    ) -> int:
+        """Transfer stdin data to remote via chunked send_command, then execute."""
+        compressed = gzip.compress(stdin_data.encode('utf-8'))
+        encoded = base64.b64encode(compressed).decode('ascii')
+
+        tmp_file = f'/tmp/.sshaws_{os.getpid()}'
+        chunk_size = 60000
+        chunks = [
+            encoded[i:i + chunk_size]
+            for i in range(0, len(encoded), chunk_size)
+        ]
+
+        for i, chunk in enumerate(chunks):
+            op = '>' if i == 0 else '>>'
+            ok = self._send_command_and_wait(
+                instance_id, [f"printf '%s' '{chunk}' {op} {tmp_file}"]
+            )
+            if not ok:
+                return 1
+
+        command_str = ' '.join(command)
+        return self._send_command_and_capture(
+            instance_id,
+            [f"base64 -d {tmp_file} | gunzip | {command_str}; rm -f {tmp_file}"]
+        )
+
+    def _send_command_and_wait(
+        self, instance_id: str, commands: List[str]
+    ) -> bool:
+        """Send a command via SSM and wait for completion."""
+        try:
+            response = self.ssm.send_command(
+                InstanceIds=[instance_id],
+                DocumentName='AWS-RunShellScript',
+                Parameters={'commands': commands}
+            )
+        except ClientError as e:
+            print(f"Error sending command: {e}", file=sys.stderr)
+            return False
+
+        command_id = response['Command']['CommandId']
+        result = self._poll_command_invocation(command_id, instance_id)
+        return result is not None and result['Status'] == 'Success'
+
+    def _send_command_and_capture(
+        self, instance_id: str, commands: List[str]
+    ) -> int:
+        """Send a command via SSM, wait, and print output."""
+        try:
+            response = self.ssm.send_command(
+                InstanceIds=[instance_id],
+                DocumentName='AWS-RunShellScript',
+                Parameters={'commands': commands}
+            )
+        except ClientError as e:
+            print(f"Error sending command: {e}", file=sys.stderr)
+            return 1
+
+        command_id = response['Command']['CommandId']
+        result = self._poll_command_invocation(command_id, instance_id)
+
+        if result is None:
+            print("Error: Timed out waiting for command result", file=sys.stderr)
+            return 1
+
+        if result.get('StandardOutputContent'):
+            sys.stdout.write(result['StandardOutputContent'])
+            sys.stdout.flush()
+        if result.get('StandardErrorContent'):
+            sys.stderr.write(result['StandardErrorContent'])
+            sys.stderr.flush()
+
+        return 0 if result['Status'] == 'Success' else 1
+
+    def _poll_command_invocation(
+        self, command_id: str, instance_id: str
+    ) -> Optional[Dict]:
+        """Poll for command invocation result."""
+        for _ in range(60):
+            time.sleep(1)
+            try:
+                result = self.ssm.get_command_invocation(
+                    CommandId=command_id,
+                    InstanceId=instance_id,
+                )
+                if result['Status'] in (
+                    'Success', 'Failed', 'TimedOut', 'Cancelled'
+                ):
+                    return result
+            except ClientError:
+                continue
+        return None
 
 
 def parse_destination(dest: str) -> Tuple[Optional[str], str]:
