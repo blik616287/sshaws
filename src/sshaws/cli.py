@@ -156,6 +156,92 @@ class SSHAWSClient:
             pass
         return 'ec2-user'
 
+    def resolve_instance_id(self, target: str) -> str:
+        """Resolve a target (instance ID, Name tag, or private IP) to an instance ID.
+
+        Returns the resolved instance ID. Exits with error if unresolvable.
+        """
+        if re.match(r'^i-[a-f0-9]{8,17}$', target):
+            return target
+
+        if re.match(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$', target):
+            return self._resolve_by_private_ip(target)
+
+        return self._resolve_by_name(target)
+
+    def _resolve_by_private_ip(self, ip_address: str) -> str:
+        """Resolve a private IP address to an instance ID."""
+        try:
+            response = self.ec2.describe_instances(
+                Filters=[
+                    {'Name': 'private-ip-address', 'Values': [ip_address]},
+                    {'Name': 'instance-state-name',
+                     'Values': ['running', 'pending', 'stopping', 'stopped']},
+                ]
+            )
+        except ClientError as e:
+            print(f"Error querying EC2: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        instances = [
+            inst for res in response.get('Reservations', [])
+            for inst in res.get('Instances', [])
+        ]
+
+        if not instances:
+            print(f"Error: No instance found with private IP: {ip_address}",
+                  file=sys.stderr)
+            sys.exit(1)
+
+        if len(instances) > 1:
+            print(f"Error: Multiple instances found with private IP {ip_address}:",
+                  file=sys.stderr)
+            for inst in instances:
+                name = next(
+                    (t['Value'] for t in inst.get('Tags', []) if t['Key'] == 'Name'),
+                    '-'
+                )
+                print(f"  {inst['InstanceId']}  {name}", file=sys.stderr)
+            sys.exit(1)
+
+        return instances[0]['InstanceId']
+
+    def _resolve_by_name(self, name: str) -> str:
+        """Resolve a Name tag to an instance ID."""
+        try:
+            response = self.ec2.describe_instances(
+                Filters=[
+                    {'Name': 'tag:Name', 'Values': [name]},
+                    {'Name': 'instance-state-name',
+                     'Values': ['running', 'pending', 'stopping', 'stopped']},
+                ]
+            )
+        except ClientError as e:
+            print(f"Error querying EC2: {e}", file=sys.stderr)
+            sys.exit(1)
+
+        instances = [
+            inst for res in response.get('Reservations', [])
+            for inst in res.get('Instances', [])
+        ]
+
+        if not instances:
+            print(f"Error: No instance found with Name tag: {name}",
+                  file=sys.stderr)
+            sys.exit(1)
+
+        if len(instances) > 1:
+            print(f"Error: Multiple instances found with Name '{name}':",
+                  file=sys.stderr)
+            for inst in instances:
+                ip = inst.get('PrivateIpAddress', '-')
+                print(f"  {inst['InstanceId']}  {ip}", file=sys.stderr)
+            print("Specify the instance ID directly to disambiguate.",
+                  file=sys.stderr)
+            sys.exit(1)
+
+        return instances[0]['InstanceId']
+
     def check_ssm_available(self, instance_id: str) -> Tuple[bool, str]:
         """Check if instance is reachable via SSM."""
         try:
@@ -270,7 +356,7 @@ class SSHAWSClient:
 
 
 def parse_destination(dest: str) -> Tuple[Optional[str], str]:
-    """Parse [user@]instance-id format."""
+    """Parse [user@]<target> where target is an instance ID, Name tag, or IP."""
     if '@' in dest:
         user, instance_id = dest.split('@', 1)
         return user, instance_id
@@ -392,8 +478,11 @@ def _create_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  sshaws i-0123456789abcdef0              # Connect as ec2-user
+  sshaws i-0123456789abcdef0              # Connect by instance ID
   sshaws ubuntu@i-0123456789abcdef0       # Connect as ubuntu
+  sshaws my-web-server                    # Connect by Name tag
+  sshaws ubuntu@my-web-server             # Name tag with user
+  sshaws ubuntu@172.20.21.43              # Connect by private IP
   sshaws -i ~/.ssh/key.pem i-xxx          # With identity file
   sshaws -L 8080:localhost:80 i-xxx       # Local port forward
   sshaws -D 1080 i-xxx                    # SOCKS proxy
@@ -411,8 +500,8 @@ Prerequisites:
                         help='AWS profile name')
     parser.add_argument('--region', metavar='REGION',
                         help='AWS region')
-    parser.add_argument('destination', nargs='?', metavar='[user@]instance-id',
-                        help='Target instance (e.g., i-xxx or ec2-user@i-xxx)')
+    parser.add_argument('destination', nargs='?', metavar='[user@]<target>',
+                        help='Target by instance ID, Name tag, or private IP')
     parser.add_argument('-i', dest='identity_file', metavar='FILE',
                         help='Identity file (private key)')
     parser.add_argument('-p', dest='port', type=int, default=22,
@@ -448,15 +537,10 @@ def _handle_ssh_command(args: argparse.Namespace) -> int:
     if not args.destination:
         return 1
 
-    user, instance_id = parse_destination(args.destination)
-
-    if not re.match(r'^i-[a-f0-9]{8,17}$', instance_id):
-        print(f"Error: Invalid instance ID format: {instance_id}", file=sys.stderr)
-        print("Instance ID should match pattern: i-xxxxxxxxxxxxxxxxx",
-              file=sys.stderr)
-        return 1
+    user, target = parse_destination(args.destination)
 
     client = SSHAWSClient(profile=args.profile, region=args.region)
+    instance_id = client.resolve_instance_id(target)
 
     if args.login_name:
         user = args.login_name

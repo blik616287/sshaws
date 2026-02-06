@@ -518,6 +518,140 @@ class TestSSHAWSClientStartSSMSession:
             assert 'myprofile' in call_args
 
 
+class TestSSHAWSClientResolveInstanceId:
+    """Tests for resolve_instance_id method."""
+
+    def test_resolve_direct_instance_id(self, mock_boto3_session):
+        """Instance ID passes through without API call."""
+        client = SSHAWSClient()
+        result = client.resolve_instance_id('i-1234567890abcdef0')
+        assert result == 'i-1234567890abcdef0'
+        mock_boto3_session['ec2'].describe_instances.assert_not_called()
+
+    def test_resolve_by_private_ip(self, mock_boto3_session):
+        """Private IP resolves to instance ID."""
+        mock_boto3_session['ec2'].describe_instances.return_value = {
+            'Reservations': [{
+                'Instances': [{
+                    'InstanceId': 'i-1234567890abcdef0',
+                    'PrivateIpAddress': '10.0.1.100',
+                    'Tags': [{'Key': 'Name', 'Value': 'web-server'}]
+                }]
+            }]
+        }
+        client = SSHAWSClient()
+        result = client.resolve_instance_id('10.0.1.100')
+        assert result == 'i-1234567890abcdef0'
+
+    def test_resolve_by_private_ip_no_match(self, mock_boto3_session):
+        """Private IP with no match exits."""
+        mock_boto3_session['ec2'].describe_instances.return_value = {
+            'Reservations': []
+        }
+        client = SSHAWSClient()
+        with pytest.raises(SystemExit) as exc_info:
+            client.resolve_instance_id('10.0.99.99')
+        assert exc_info.value.code == 1
+
+    def test_resolve_by_private_ip_multiple(self, mock_boto3_session, capsys):
+        """Private IP with multiple matches lists them."""
+        mock_boto3_session['ec2'].describe_instances.return_value = {
+            'Reservations': [{
+                'Instances': [
+                    {
+                        'InstanceId': 'i-aaa1111111111111a',
+                        'Tags': [{'Key': 'Name', 'Value': 'host-a'}]
+                    },
+                    {
+                        'InstanceId': 'i-bbb2222222222222b',
+                        'Tags': [{'Key': 'Name', 'Value': 'host-b'}]
+                    },
+                ]
+            }]
+        }
+        client = SSHAWSClient()
+        with pytest.raises(SystemExit):
+            client.resolve_instance_id('10.0.1.100')
+        captured = capsys.readouterr()
+        assert 'Multiple instances' in captured.err
+        assert 'i-aaa1111111111111a' in captured.err
+        assert 'i-bbb2222222222222b' in captured.err
+
+    def test_resolve_by_name(self, mock_boto3_session):
+        """Name tag resolves to instance ID."""
+        mock_boto3_session['ec2'].describe_instances.return_value = {
+            'Reservations': [{
+                'Instances': [{
+                    'InstanceId': 'i-1234567890abcdef0',
+                    'PrivateIpAddress': '10.0.1.100',
+                    'Tags': [{'Key': 'Name', 'Value': 'web-server'}]
+                }]
+            }]
+        }
+        client = SSHAWSClient()
+        result = client.resolve_instance_id('web-server')
+        assert result == 'i-1234567890abcdef0'
+
+    def test_resolve_by_name_no_match(self, mock_boto3_session, capsys):
+        """Name tag with no match exits."""
+        mock_boto3_session['ec2'].describe_instances.return_value = {
+            'Reservations': []
+        }
+        client = SSHAWSClient()
+        with pytest.raises(SystemExit) as exc_info:
+            client.resolve_instance_id('nonexistent-server')
+        assert exc_info.value.code == 1
+        captured = capsys.readouterr()
+        assert 'No instance found with Name tag' in captured.err
+
+    def test_resolve_by_name_multiple(self, mock_boto3_session, capsys):
+        """Name tag with multiple matches lists them."""
+        mock_boto3_session['ec2'].describe_instances.return_value = {
+            'Reservations': [{
+                'Instances': [
+                    {
+                        'InstanceId': 'i-aaa1111111111111a',
+                        'PrivateIpAddress': '10.0.1.100',
+                    },
+                    {
+                        'InstanceId': 'i-bbb2222222222222b',
+                        'PrivateIpAddress': '10.0.1.101',
+                    },
+                ]
+            }]
+        }
+        client = SSHAWSClient()
+        with pytest.raises(SystemExit):
+            client.resolve_instance_id('web-server')
+        captured = capsys.readouterr()
+        assert 'Multiple instances' in captured.err
+        assert 'disambiguate' in captured.err.lower()
+
+    def test_resolve_by_private_ip_client_error(self, mock_boto3_session, capsys):
+        """EC2 API error during IP resolution."""
+        mock_boto3_session['ec2'].describe_instances.side_effect = ClientError(
+            {'Error': {'Code': 'AccessDenied', 'Message': 'Denied'}},
+            'DescribeInstances'
+        )
+        client = SSHAWSClient()
+        with pytest.raises(SystemExit):
+            client.resolve_instance_id('10.0.1.100')
+        captured = capsys.readouterr()
+        assert 'Error querying EC2' in captured.err
+
+    def test_resolve_by_name_client_error(self, mock_boto3_session, capsys):
+        """EC2 API error during name resolution."""
+        mock_boto3_session['ec2'].describe_instances.side_effect = ClientError(
+            {'Error': {'Code': 'AccessDenied', 'Message': 'Denied'}},
+            'DescribeInstances'
+        )
+        client = SSHAWSClient()
+        with pytest.raises(SystemExit):
+            client.resolve_instance_id('web-server')
+        captured = capsys.readouterr()
+        assert 'Error querying EC2' in captured.err
+
+
 class TestParseDestination:
     """Tests for parse_destination function."""
 
@@ -538,6 +672,24 @@ class TestParseDestination:
         user, instance_id = parse_destination('user@domain@i-1234567890abcdef0')
         assert user == 'user'
         assert instance_id == 'domain@i-1234567890abcdef0'
+
+    def test_parse_with_name_tag(self):
+        """Test parsing destination with Name tag."""
+        user, target = parse_destination('ubuntu@web-server')
+        assert user == 'ubuntu'
+        assert target == 'web-server'
+
+    def test_parse_with_ip_address(self):
+        """Test parsing destination with IP address."""
+        user, target = parse_destination('ubuntu@172.20.21.43')
+        assert user == 'ubuntu'
+        assert target == '172.20.21.43'
+
+    def test_parse_name_without_user(self):
+        """Test parsing Name tag without user."""
+        user, target = parse_destination('web-server')
+        assert user is None
+        assert target == 'web-server'
 
 
 class TestFormatInstanceList:
@@ -720,14 +872,18 @@ class TestMain:
             parsed = json.loads(captured.out)
             assert isinstance(parsed, list)
 
-    def test_main_invalid_instance_id(self, capsys):
-        """Test main with invalid instance ID."""
-        with patch.object(sys, 'argv', ['sshaws', 'invalid-id']):
-            with patch('sshaws.cli.boto3.Session'):
-                result = main()
-                assert result == 1
-                captured = capsys.readouterr()
-                assert 'Invalid instance ID' in captured.err
+    def test_main_resolve_name_not_found(self, mock_boto3_session, capsys):
+        """Test main with Name tag that matches no instances."""
+        mock_boto3_session['ec2'].describe_instances.return_value = {
+            'Reservations': []
+        }
+
+        with patch.object(sys, 'argv', ['sshaws', 'nonexistent-host']):
+            with pytest.raises(SystemExit) as exc_info:
+                main()
+            assert exc_info.value.code == 1
+            captured = capsys.readouterr()
+            assert 'No instance found with Name tag' in captured.err
 
     def test_main_ssh_connection(self, mock_boto3_session):
         """Test main with SSH connection."""
@@ -843,3 +999,73 @@ class TestMain:
         with patch.object(sys, 'argv', ['sshaws', '-P', 'myprofile', 'list']):
             result = main()
             assert result == 0
+
+    def test_main_ssh_by_name(self, mock_boto3_session):
+        """Test SSH connection using Name tag."""
+        mock_boto3_session['ec2'].describe_instances.return_value = {
+            'Reservations': [{
+                'Instances': [{
+                    'InstanceId': 'i-1234567890abcdef0',
+                    'Tags': [{'Key': 'Name', 'Value': 'web-server'}]
+                }]
+            }]
+        }
+        mock_boto3_session['ssm'].describe_instance_information.return_value = {
+            'InstanceInformationList': [
+                {'PingStatus': 'Online', 'PlatformName': 'Amazon Linux'}
+            ]
+        }
+
+        with patch.object(sys, 'argv', ['sshaws', 'web-server']):
+            with patch('sshaws.cli.subprocess.call') as mock_call:
+                mock_call.return_value = 0
+                result = main()
+                assert result == 0
+                call_args = mock_call.call_args[0][0]
+                assert 'ec2-user@i-1234567890abcdef0' in call_args
+
+    def test_main_ssh_by_name_with_user(self, mock_boto3_session):
+        """Test SSH connection using user@Name format."""
+        mock_boto3_session['ec2'].describe_instances.return_value = {
+            'Reservations': [{
+                'Instances': [{
+                    'InstanceId': 'i-1234567890abcdef0',
+                    'Tags': [{'Key': 'Name', 'Value': 'web-server'}]
+                }]
+            }]
+        }
+        mock_boto3_session['ssm'].describe_instance_information.return_value = {
+            'InstanceInformationList': [{'PingStatus': 'Online'}]
+        }
+
+        with patch.object(sys, 'argv', ['sshaws', 'ubuntu@web-server']):
+            with patch('sshaws.cli.subprocess.call') as mock_call:
+                mock_call.return_value = 0
+                result = main()
+                assert result == 0
+                call_args = mock_call.call_args[0][0]
+                assert 'ubuntu@i-1234567890abcdef0' in call_args
+
+    def test_main_ssh_by_private_ip(self, mock_boto3_session):
+        """Test SSH connection using private IP."""
+        mock_boto3_session['ec2'].describe_instances.return_value = {
+            'Reservations': [{
+                'Instances': [{
+                    'InstanceId': 'i-1234567890abcdef0',
+                    'PrivateIpAddress': '172.20.21.43',
+                }]
+            }]
+        }
+        mock_boto3_session['ssm'].describe_instance_information.return_value = {
+            'InstanceInformationList': [
+                {'PingStatus': 'Online', 'PlatformName': 'Ubuntu'}
+            ]
+        }
+
+        with patch.object(sys, 'argv', ['sshaws', 'ubuntu@172.20.21.43']):
+            with patch('sshaws.cli.subprocess.call') as mock_call:
+                mock_call.return_value = 0
+                result = main()
+                assert result == 0
+                call_args = mock_call.call_args[0][0]
+                assert 'ubuntu@i-1234567890abcdef0' in call_args
