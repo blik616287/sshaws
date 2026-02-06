@@ -15,6 +15,7 @@ import json
 import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Tuple
 
@@ -354,6 +355,53 @@ class SSHAWSClient:
 
         return subprocess.call(cmd)
 
+    def run_ssm_command(self, instance_id: str, command: List[str]) -> int:
+        """Run a non-interactive command via SSM SendCommand."""
+        try:
+            response = self.ssm.send_command(
+                InstanceIds=[instance_id],
+                DocumentName='AWS-RunShellScript',
+                Parameters={'commands': [' '.join(command)]}
+            )
+        except ClientError as e:
+            print(f"Error sending command: {e}", file=sys.stderr)
+            return 1
+
+        command_id = response['Command']['CommandId']
+
+        result = self._poll_command_invocation(command_id, instance_id)
+        if result is None:
+            print("Error: Timed out waiting for command result", file=sys.stderr)
+            return 1
+
+        if result.get('StandardOutputContent'):
+            print(result['StandardOutputContent'], end='')
+        if result.get('StandardErrorContent'):
+            print(result['StandardErrorContent'], end='', file=sys.stderr)
+
+        if result['Status'] == 'Success':
+            return 0
+        return 1
+
+    def _poll_command_invocation(
+        self, command_id: str, instance_id: str
+    ) -> Optional[Dict]:
+        """Poll for command invocation result."""
+        for _ in range(60):
+            time.sleep(1)
+            try:
+                result = self.ssm.get_command_invocation(
+                    CommandId=command_id,
+                    InstanceId=instance_id,
+                )
+                if result['Status'] in (
+                    'Success', 'Failed', 'TimedOut', 'Cancelled'
+                ):
+                    return result
+            except ClientError:
+                continue
+        return None
+
 
 def parse_destination(dest: str) -> Tuple[Optional[str], str]:
     """Parse [user@]<target> where target is an instance ID, Name tag, or IP."""
@@ -548,6 +596,8 @@ def _handle_ssh_command(args: argparse.Namespace) -> int:
         user = client.get_default_user(instance_id)
 
     if args.ssm:
+        if args.remote_command:
+            return client.run_ssm_command(instance_id, args.remote_command)
         return client.start_ssm_session(instance_id)
 
     forwarding = ForwardingOptions(
