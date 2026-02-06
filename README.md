@@ -341,8 +341,6 @@ sshaws -vvv i-0123456789abcdef0
       "ssm:StartSession",
       "ssm:TerminateSession",
       "ssm:DescribeInstanceInformation",
-      "ssm:SendCommand",
-      "ssm:GetCommandInvocation",
       "ec2:DescribeInstances"
     ],
     "Resource": "*"
