@@ -15,7 +15,6 @@ import json
 import re
 import subprocess
 import sys
-import time
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Tuple
 
@@ -359,61 +358,25 @@ class SSHAWSClient:
         self, instance_id: str, command: List[str],
         stdin_data: Optional[str] = None
     ) -> int:
-        """Run a non-interactive command via SSM SendCommand."""
-        command_str = ' '.join(command)
+        """Run a non-interactive command via SSM start-session."""
+        cmd = [
+            'aws', 'ssm', 'start-session',
+            '--target', instance_id,
+            '--document-name', 'AWS-StartNonInteractiveCommand',
+            '--parameters', json.dumps({'command': [' '.join(command)]})
+        ]
+
+        if self.session.profile_name:
+            cmd.extend(['--profile', self.session.profile_name])
+        if self.region:
+            cmd.extend(['--region', self.region])
+
         if stdin_data:
-            commands = [
-                f"{command_str} << 'SSHAWS_EOF'",
-                stdin_data,
-                "SSHAWS_EOF"
-            ]
-        else:
-            commands = [command_str]
-
-        try:
-            response = self.ssm.send_command(
-                InstanceIds=[instance_id],
-                DocumentName='AWS-RunShellScript',
-                Parameters={'commands': commands}
+            result = subprocess.run(
+                cmd, input=stdin_data, text=True, check=False
             )
-        except ClientError as e:
-            print(f"Error sending command: {e}", file=sys.stderr)
-            return 1
-
-        command_id = response['Command']['CommandId']
-
-        result = self._poll_command_invocation(command_id, instance_id)
-        if result is None:
-            print("Error: Timed out waiting for command result", file=sys.stderr)
-            return 1
-
-        if result.get('StandardOutputContent'):
-            print(result['StandardOutputContent'], end='')
-        if result.get('StandardErrorContent'):
-            print(result['StandardErrorContent'], end='', file=sys.stderr)
-
-        if result['Status'] == 'Success':
-            return 0
-        return 1
-
-    def _poll_command_invocation(
-        self, command_id: str, instance_id: str
-    ) -> Optional[Dict]:
-        """Poll for command invocation result."""
-        for _ in range(60):
-            time.sleep(1)
-            try:
-                result = self.ssm.get_command_invocation(
-                    CommandId=command_id,
-                    InstanceId=instance_id,
-                )
-                if result['Status'] in (
-                    'Success', 'Failed', 'TimedOut', 'Cancelled'
-                ):
-                    return result
-            except ClientError:
-                continue
-        return None
+            return result.returncode
+        return subprocess.call(cmd)
 
 
 def parse_destination(dest: str) -> Tuple[Optional[str], str]:
