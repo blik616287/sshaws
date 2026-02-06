@@ -1,3 +1,16 @@
+Metadata-Version: 2.4
+Name: sshaws
+Version: 0.1.0
+Summary: SSH to private AWS EC2 instances via SSM
+License-Expression: MIT
+Requires-Python: >=3.8
+Description-Content-Type: text/markdown
+Requires-Dist: boto3
+Provides-Extra: test
+Requires-Dist: pytest>=7.0; extra == "test"
+Requires-Dist: pytest-cov>=4.0; extra == "test"
+Requires-Dist: moto>=5.0; extra == "test"
+
 # sshaws
 
 SSH to private AWS EC2 instances via SSM. Drop-in replacement for `ssh` when connecting to EC2 instances.

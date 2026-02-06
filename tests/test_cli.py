@@ -634,6 +634,51 @@ class TestSSHAWSClientRunSSMCommand:
         call_kwargs = mock_boto3_session['ssm'].send_command.call_args
         assert call_kwargs[1]['Parameters']['commands'] == ['uname -a']
 
+    def test_run_command_with_stdin(self, mock_boto3_session, capsys):
+        """Test command with stdin data uses heredoc."""
+        mock_boto3_session['ssm'].send_command.return_value = {
+            'Command': {'CommandId': 'cmd-123'}
+        }
+        mock_boto3_session['ssm'].get_command_invocation.return_value = {
+            'Status': 'Success',
+            'StandardOutputContent': '{"msg": "ok"}\n',
+            'StandardErrorContent': '',
+        }
+
+        with patch('sshaws.cli.time.sleep'):
+            client = SSHAWSClient()
+            result = client.run_ssm_command(
+                'i-1234567890abcdef0', ['python3'],
+                stdin_data='print("hello")'
+            )
+
+        assert result == 0
+        call_kwargs = mock_boto3_session['ssm'].send_command.call_args
+        commands = call_kwargs[1]['Parameters']['commands']
+        assert commands[0] == "python3 << 'SSHAWS_EOF'"
+        assert commands[1] == 'print("hello")'
+        assert commands[2] == 'SSHAWS_EOF'
+
+    def test_run_command_without_stdin(self, mock_boto3_session):
+        """Test command without stdin data uses plain command."""
+        mock_boto3_session['ssm'].send_command.return_value = {
+            'Command': {'CommandId': 'cmd-123'}
+        }
+        mock_boto3_session['ssm'].get_command_invocation.return_value = {
+            'Status': 'Success',
+            'StandardOutputContent': '',
+            'StandardErrorContent': '',
+        }
+
+        with patch('sshaws.cli.time.sleep'):
+            client = SSHAWSClient()
+            client.run_ssm_command(
+                'i-1234567890abcdef0', ['uname'], stdin_data=None
+            )
+
+        call_kwargs = mock_boto3_session['ssm'].send_command.call_args
+        assert call_kwargs[1]['Parameters']['commands'] == ['uname']
+
 
 class TestSSHAWSClientResolveInstanceId:
     """Tests for resolve_instance_id method."""
@@ -1198,12 +1243,16 @@ class TestMain:
             'StandardErrorContent': '',
         }
 
+        mock_stdin = MagicMock()
+        mock_stdin.isatty.return_value = True
+
         with patch.object(
             sys, 'argv', ['sshaws', '--ssm', 'i-1234567890abcdef0', 'uname']
         ):
             with patch('sshaws.cli.time.sleep'):
-                result = main()
-                assert result == 0
+                with patch('sshaws.cli.sys.stdin', mock_stdin):
+                    result = main()
+                    assert result == 0
 
         mock_boto3_session['ssm'].send_command.assert_called_once()
         captured = capsys.readouterr()
@@ -1221,3 +1270,30 @@ class TestMain:
                 call_args = mock_call.call_args[0][0]
                 assert 'start-session' in call_args
         mock_boto3_session['ssm'].send_command.assert_not_called()
+
+    def test_main_ssm_mode_with_stdin(self, mock_boto3_session, capsys):
+        """Test --ssm with piped stdin uses heredoc in send_command."""
+        mock_boto3_session['ssm'].send_command.return_value = {
+            'Command': {'CommandId': 'cmd-123'}
+        }
+        mock_boto3_session['ssm'].get_command_invocation.return_value = {
+            'Status': 'Success',
+            'StandardOutputContent': '{"changed": true}\n',
+            'StandardErrorContent': '',
+        }
+
+        from io import StringIO
+        fake_stdin = StringIO('import json; print(json.dumps({"changed": True}))')
+
+        with patch.object(sys, 'argv', [
+            'sshaws', '--ssm', 'i-1234567890abcdef0', 'python3'
+        ]):
+            with patch('sshaws.cli.time.sleep'):
+                with patch('sshaws.cli.sys.stdin', fake_stdin):
+                    result = main()
+
+        assert result == 0
+        call_kwargs = mock_boto3_session['ssm'].send_command.call_args
+        commands = call_kwargs[1]['Parameters']['commands']
+        assert commands[0] == "python3 << 'SSHAWS_EOF'"
+        assert commands[2] == 'SSHAWS_EOF'

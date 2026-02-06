@@ -1,0 +1,11 @@
+README.md
+pyproject.toml
+src/sshaws/__init__.py
+src/sshaws/cli.py
+src/sshaws.egg-info/PKG-INFO
+src/sshaws.egg-info/SOURCES.txt
+src/sshaws.egg-info/dependency_links.txt
+src/sshaws.egg-info/entry_points.txt
+src/sshaws.egg-info/requires.txt
+src/sshaws.egg-info/top_level.txt
+tests/test_cli.py
