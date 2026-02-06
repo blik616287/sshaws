@@ -1,6 +1,7 @@
 """Tests for sshaws CLI module."""
 
 import json
+import subprocess
 import sys
 import pytest
 from unittest.mock import MagicMock, patch
@@ -521,27 +522,36 @@ class TestSSHAWSClientStartSSMSession:
 class TestSSHAWSClientRunSSMCommand:
     """Tests for run_ssm_command method."""
 
+    @staticmethod
+    def _mock_popen(stdout=b'', stderr=b'', returncode=0):
+        """Create a mock Popen object with context manager support."""
+        mock_proc = MagicMock()
+        mock_proc.__enter__.return_value = mock_proc
+        mock_proc.communicate.return_value = (stdout, stderr)
+        mock_proc.returncode = returncode
+        return mock_proc
+
     def test_run_command_without_stdin(self, mock_boto3_session):
-        """Test command without stdin uses subprocess.call."""
-        with patch('sshaws.cli.subprocess.call') as mock_call:
-            mock_call.return_value = 0
+        """Test command without stdin."""
+        with patch('sshaws.cli.subprocess.Popen') as mock_popen:
+            mock_popen.return_value = self._mock_popen()
             client = SSHAWSClient()
             result = client.run_ssm_command(
                 'i-1234567890abcdef0', ['uname', '-a']
             )
 
             assert result == 0
-            call_args = mock_call.call_args[0][0]
+            call_args = mock_popen.call_args[0][0]
             assert 'start-session' in call_args
             assert 'AWS-StartNonInteractiveCommand' in call_args
             params_idx = call_args.index('--parameters') + 1
             params = json.loads(call_args[params_idx])
             assert params == {'command': ['uname -a']}
 
-    def test_run_command_with_stdin(self, mock_boto3_session):
-        """Test command with stdin uses subprocess.run with input."""
-        with patch('sshaws.cli.subprocess.run') as mock_run:
-            mock_run.return_value = MagicMock(returncode=0)
+    def test_run_command_with_stdin_pipes_input(self, mock_boto3_session):
+        """Test command with stdin pipes data through Popen stdin."""
+        with patch('sshaws.cli.subprocess.Popen') as mock_popen:
+            mock_popen.return_value = self._mock_popen()
             client = SSHAWSClient()
             result = client.run_ssm_command(
                 'i-1234567890abcdef0', ['python3'],
@@ -549,30 +559,68 @@ class TestSSHAWSClientRunSSMCommand:
             )
 
             assert result == 0
-            mock_run.assert_called_once()
-            call_kwargs = mock_run.call_args
-            assert call_kwargs[1]['input'] == 'print("hello")'
-            assert call_kwargs[1]['text'] is True
-            call_args = call_kwargs[0][0]
-            assert 'AWS-StartNonInteractiveCommand' in call_args
+            popen_kwargs = mock_popen.call_args[1]
+            assert popen_kwargs['stdin'] == subprocess.PIPE
+            comm_kwargs = mock_popen.return_value.communicate.call_args
+            assert comm_kwargs[1]['input'] == b'print("hello")'
+            call_args = mock_popen.call_args[0][0]
+            params_idx = call_args.index('--parameters') + 1
+            params = json.loads(call_args[params_idx])
+            assert params == {'command': ['python3']}
+
+    def test_run_command_strips_banners(self, mock_boto3_session, capsys):
+        """Test that session banners are stripped from output."""
+        banner_output = (
+            b'Starting session with SessionId: user-abc123\n'
+            b'actual output\n'
+            b'Exiting session with sessionId: user-abc123\n'
+        )
+        with patch('sshaws.cli.subprocess.Popen') as mock_popen:
+            mock_popen.return_value = self._mock_popen(stdout=banner_output)
+            client = SSHAWSClient()
+            result = client.run_ssm_command(
+                'i-1234567890abcdef0', ['uname', '-a']
+            )
+
+            assert result == 0
+            captured = capsys.readouterr()
+            assert 'actual output' in captured.out
+            assert 'Starting session' not in captured.out
+            assert 'Exiting session' not in captured.out
+
+    def test_run_command_strips_banners_from_stderr(self, mock_boto3_session, capsys):
+        """Test that session banners are stripped from stderr too."""
+        banner_stderr = (
+            b'Starting session with SessionId: user-abc123\n'
+            b'some error\n'
+            b'Exiting session with sessionId: user-abc123\n'
+        )
+        with patch('sshaws.cli.subprocess.Popen') as mock_popen:
+            mock_popen.return_value = self._mock_popen(stderr=banner_stderr)
+            client = SSHAWSClient()
+            client.run_ssm_command('i-1234567890abcdef0', ['uname'])
+
+            captured = capsys.readouterr()
+            assert 'some error' in captured.err
+            assert 'Starting session' not in captured.err
 
     def test_run_command_with_profile(self, mock_boto3_session):
         """Test command includes profile in start-session args."""
         mock_boto3_session['session'].profile_name = 'myprofile'
 
-        with patch('sshaws.cli.subprocess.call') as mock_call:
-            mock_call.return_value = 0
+        with patch('sshaws.cli.subprocess.Popen') as mock_popen:
+            mock_popen.return_value = self._mock_popen()
             client = SSHAWSClient(profile='myprofile')
             client.run_ssm_command('i-1234567890abcdef0', ['uname'])
 
-            call_args = mock_call.call_args[0][0]
+            call_args = mock_popen.call_args[0][0]
             assert '--profile' in call_args
             assert 'myprofile' in call_args
 
     def test_run_command_nonzero_exit(self, mock_boto3_session):
         """Test command returns non-zero exit code."""
-        with patch('sshaws.cli.subprocess.call') as mock_call:
-            mock_call.return_value = 127
+        with patch('sshaws.cli.subprocess.Popen') as mock_popen:
+            mock_popen.return_value = self._mock_popen(returncode=127)
             client = SSHAWSClient()
             result = client.run_ssm_command(
                 'i-1234567890abcdef0', ['badcmd']
@@ -582,8 +630,8 @@ class TestSSHAWSClientRunSSMCommand:
 
     def test_run_command_stdin_nonzero_exit(self, mock_boto3_session):
         """Test command with stdin returns non-zero exit code."""
-        with patch('sshaws.cli.subprocess.run') as mock_run:
-            mock_run.return_value = MagicMock(returncode=1)
+        with patch('sshaws.cli.subprocess.Popen') as mock_popen:
+            mock_popen.return_value = self._mock_popen(returncode=1)
             client = SSHAWSClient()
             result = client.run_ssm_command(
                 'i-1234567890abcdef0', ['python3'],
@@ -591,6 +639,17 @@ class TestSSHAWSClientRunSSMCommand:
             )
 
             assert result == 1
+
+    def test_run_command_empty_output(self, mock_boto3_session, capsys):
+        """Test command with no output."""
+        with patch('sshaws.cli.subprocess.Popen') as mock_popen:
+            mock_popen.return_value = self._mock_popen()
+            client = SSHAWSClient()
+            client.run_ssm_command('i-1234567890abcdef0', ['true'])
+
+            captured = capsys.readouterr()
+            assert captured.out == ''
+            assert captured.err == ''
 
 
 class TestSSHAWSClientResolveInstanceId:
@@ -1150,16 +1209,21 @@ class TestMain:
         mock_stdin = MagicMock()
         mock_stdin.isatty.return_value = True
 
+        mock_proc = MagicMock()
+        mock_proc.__enter__.return_value = mock_proc
+        mock_proc.communicate.return_value = (b'Linux\n', b'')
+        mock_proc.returncode = 0
+
         with patch.object(
             sys, 'argv', ['sshaws', '--ssm', 'i-1234567890abcdef0', 'uname']
         ):
-            with patch('sshaws.cli.subprocess.call') as mock_call:
-                mock_call.return_value = 0
+            with patch('sshaws.cli.subprocess.Popen') as mock_popen:
+                mock_popen.return_value = mock_proc
                 with patch('sshaws.cli.sys.stdin', mock_stdin):
                     result = main()
                     assert result == 0
 
-                call_args = mock_call.call_args[0][0]
+                call_args = mock_popen.call_args[0][0]
                 assert 'AWS-StartNonInteractiveCommand' in call_args
 
     def test_main_ssm_mode_without_command(self, mock_boto3_session):
@@ -1176,20 +1240,27 @@ class TestMain:
                 assert 'AWS-StartNonInteractiveCommand' not in call_args
 
     def test_main_ssm_mode_with_stdin(self, mock_boto3_session):
-        """Test --ssm with piped stdin uses subprocess.run with input."""
+        """Test --ssm with piped stdin pipes data through Popen stdin."""
         from io import StringIO
         fake_stdin = StringIO('import json; print(json.dumps({"changed": True}))')
+
+        mock_proc = MagicMock()
+        mock_proc.__enter__.return_value = mock_proc
+        mock_proc.communicate.return_value = (b'{"changed": true}\n', b'')
+        mock_proc.returncode = 0
 
         with patch.object(sys, 'argv', [
             'sshaws', '--ssm', 'i-1234567890abcdef0', 'python3'
         ]):
-            with patch('sshaws.cli.subprocess.run') as mock_run:
-                mock_run.return_value = MagicMock(returncode=0)
+            with patch('sshaws.cli.subprocess.Popen') as mock_popen:
+                mock_popen.return_value = mock_proc
                 with patch('sshaws.cli.sys.stdin', fake_stdin):
                     result = main()
 
         assert result == 0
-        call_kwargs = mock_run.call_args
-        assert 'import json' in call_kwargs[1]['input']
-        call_args = call_kwargs[0][0]
+        call_args = mock_popen.call_args[0][0]
         assert 'AWS-StartNonInteractiveCommand' in call_args
+        popen_kwargs = mock_popen.call_args[1]
+        assert popen_kwargs['stdin'] == subprocess.PIPE
+        comm_kwargs = mock_proc.communicate.call_args
+        assert b'import json' in comm_kwargs[1]['input']
