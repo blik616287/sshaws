@@ -355,13 +355,26 @@ class SSHAWSClient:
 
         return subprocess.call(cmd)
 
-    def run_ssm_command(self, instance_id: str, command: List[str]) -> int:
+    def run_ssm_command(
+        self, instance_id: str, command: List[str],
+        stdin_data: Optional[str] = None
+    ) -> int:
         """Run a non-interactive command via SSM SendCommand."""
+        command_str = ' '.join(command)
+        if stdin_data:
+            commands = [
+                f"{command_str} << 'SSHAWS_EOF'",
+                stdin_data,
+                "SSHAWS_EOF"
+            ]
+        else:
+            commands = [command_str]
+
         try:
             response = self.ssm.send_command(
                 InstanceIds=[instance_id],
                 DocumentName='AWS-RunShellScript',
-                Parameters={'commands': [' '.join(command)]}
+                Parameters={'commands': commands}
             )
         except ClientError as e:
             print(f"Error sending command: {e}", file=sys.stderr)
@@ -597,7 +610,12 @@ def _handle_ssh_command(args: argparse.Namespace) -> int:
 
     if args.ssm:
         if args.remote_command:
-            return client.run_ssm_command(instance_id, args.remote_command)
+            stdin_data = None
+            if not sys.stdin.isatty():
+                stdin_data = sys.stdin.read()
+            return client.run_ssm_command(
+                instance_id, args.remote_command, stdin_data=stdin_data
+            )
         return client.start_ssm_session(instance_id)
 
     forwarding = ForwardingOptions(

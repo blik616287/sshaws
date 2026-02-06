@@ -184,7 +184,12 @@ sshaws --ssm my-web-server
 # Run a non-interactive command via SSM (no SSH key needed)
 sshaws --ssm i-0123456789abcdef0 uname -a
 sshaws --ssm my-web-server 'cat /etc/os-release'
+
+# Piped stdin is forwarded to the remote command
+echo 'print("hello")' | sshaws --ssm my-web-server python3
 ```
+
+SSM commands support stdin piping, which enables Ansible pipelining (`pipelining = True`) with both `ansible.builtin.raw` and `ansible.builtin.command`.
 
 ## CLI Reference
 
